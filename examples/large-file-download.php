@@ -18,7 +18,7 @@
 include_once __DIR__ . '/../vendor/autoload.php';
 include_once "templates/base.php";
 
-echo pageHeader("File Upload - Uploading a simple file");
+echo pageHeader("File Download - Downloading a large file");
 
 /*************************************************
  * Ensure you've downloaded your oauth credentials
@@ -30,7 +30,7 @@ if (!$oauth_credentials = getOAuthCredentialsFile()) {
 
 /************************************************
  * The redirect URI is to the current page, e.g:
- * http://localhost:8080/simple-file-upload.php
+ * http://localhost:8080/large-file-download.php
  ************************************************/
 $redirect_uri = 'http://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF'];
 
@@ -39,11 +39,6 @@ $client->setAuthConfig($oauth_credentials);
 $client->setRedirectUri($redirect_uri);
 $client->addScope("https://www.googleapis.com/auth/drive");
 $service = new Google_Service_Drive($client);
-
-// add "?logout" to the URL to remove a token from the session
-if (isset($_REQUEST['logout'])) {
-  unset($_SESSION['upload_token']);
-}
 
 /************************************************
  * If we have a code back from the OAuth 2.0 flow,
@@ -74,41 +69,63 @@ if (!empty($_SESSION['upload_token'])) {
 }
 
 /************************************************
- * If we're signed in then lets try to upload our
- * file. For larger files, see fileupload.php.
+ * If we're signed in then lets try to download our
+ * file.
  ************************************************/
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && $client->getAccessToken()) {
-  // We'll setup an empty 1MB file to upload.
-  DEFINE("TESTFILE", 'testfile-small.txt');
-  if (!file_exists(TESTFILE)) {
-    $fh = fopen(TESTFILE, 'w');
-    fseek($fh, 1024 * 1024);
-    fwrite($fh, "!", 1);
-    fclose($fh);
+if ($client->getAccessToken()) {
+  // Check for "Big File" and include the file ID and size
+  $files = $service->files->listFiles([
+    'q' => "name='Big File'",
+    'fields' => 'files(id,size)'
+  ]);
+
+  if (count($files) == 0) {
+    echo "
+      <h3 class='warn'>
+        Before you can use this sample, you need to
+        <a href='/large-file-upload.php'>upload a large file to Drive</a>.
+      </h3>";
+    return;
   }
 
-  // This is uploading a file directly, with no metadata associated.
-  $file = new Google_Service_Drive_DriveFile();
-  $result = $service->files->create(
-      $file,
-      array(
-        'data' => file_get_contents(TESTFILE),
-        'mimeType' => 'application/octet-stream',
-        'uploadType' => 'media'
-      )
-  );
+  // If this is a POST, download the file
+  if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    // Determine the file's size and ID
+    $fileId = $files[0]->id;
+    $fileSize = intval($files[0]->size);
 
-  // Now lets try and send the metadata as well using multipart!
-  $file = new Google_Service_Drive_DriveFile();
-  $file->setName("Hello World!");
-  $result2 = $service->files->create(
-      $file,
-      array(
-        'data' => file_get_contents(TESTFILE),
-        'mimeType' => 'application/octet-stream',
-        'uploadType' => 'multipart'
-      )
-  );
+    // Get the authorized Guzzle HTTP client
+    $http = $client->authorize();
+
+    // Open a file for writing
+    $fp = fopen('Big File (downloaded)', 'w');
+
+    // Download in 1 MB chunks
+    $chunkSizeBytes = 1 * 1024 * 1024;
+    $chunkStart = 0;
+
+    // Iterate over each chunk and write it to our file
+    while ($chunkStart < $fileSize) {
+      $chunkEnd = $chunkStart + $chunkSizeBytes;
+      $response = $http->request(
+        'GET',
+        sprintf('/drive/v3/files/%s', $fileId),
+        [
+          'query' => ['alt' => 'media'],
+          'headers' => [
+            'Range' => sprintf('bytes=%s-%s', $chunkStart, $chunkEnd)
+          ]
+        ]
+      );
+      $chunkStart = $chunkEnd + 1;
+      fwrite($fp, $response->getBody()->getContents());
+    }
+    // close the file pointer
+    fclose($fp);
+
+    // redirect back to this example
+    header('Location: ' . filter_var($redirect_uri . '?downloaded', FILTER_SANITIZE_URL));
+  }
 }
 ?>
 
@@ -117,17 +134,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $client->getAccessToken()) {
   <div class="request">
     <a class='login' href='<?= $authUrl ?>'>Connect Me!</a>
   </div>
-<?php elseif($_SERVER['REQUEST_METHOD'] == 'POST'): ?>
+<?php elseif(isset($_GET['downloaded'])): ?>
   <div class="shortened">
-    <p>Your call was successful! Check your drive for the following files:</p>
-    <ul>
-      <li><a href="https://drive.google.com/open?id=<?= $result->id ?>" target="_blank"><?= $result->name ?></a></li>
-      <li><a href="https://drive.google.com/open?id=<?= $result2->id ?>" target="_blank"><?= $result2->name ?></a></li>
-    </ul>
+    <p>Your call was successful! Check your filesystem for the file:</p>
+    <p><code><?= __DIR__ . DIRECTORY_SEPARATOR ?>Big File (downloaded)</code></p>
   </div>
 <?php else: ?>
   <form method="POST">
-    <input type="submit" value="Click here to upload two small (1MB) test files" />
+    <input type="submit" value="Click here to download a large (20MB) test file" />
   </form>
 <?php endif ?>
 </div>
